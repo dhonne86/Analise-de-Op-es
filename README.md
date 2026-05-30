@@ -12,6 +12,8 @@ Abra: http://localhost:8000
 
 ## Publicar no Render
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/dhonne86/Analise-de-Op-es)
+
 Este repositorio inclui `render.yaml`. No Render, crie um novo Blueprint apontando para:
 
 ```text
