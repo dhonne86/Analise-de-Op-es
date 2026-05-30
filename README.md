@@ -47,6 +47,17 @@ FREE_CACHE_CLOSED_SECONDS=86400
 
 Importante: a fonte gratuita publica da OpLab possui atraso. Para tick a tick real-time, e necessario contratar uma fonte autorizada/API paga.
 
+## Modelo Black-Scholes
+
+O analista usa Black-Scholes com:
+
+- taxa livre de risco em `RISK_FREE_RATE`;
+- dividend yield/carry em `DIVIDEND_YIELD`;
+- tempo por dias uteis em `TRADING_DAYS`;
+- delta, gamma, theta diaria, vega, rho, d1, d2, probabilidade ITM, breakeven e expected move.
+
+O ranking usa edge executavel contra o ask, spread, liquidez, theta relativo, VI relativa por vencimento/tipo e distancia ate o breakeven.
+
 ## Configurar API PRO da OpLab
 
 Somente se voce tiver plano com API, ligue a API paga explicitamente:

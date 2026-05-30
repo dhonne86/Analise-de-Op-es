@@ -23,6 +23,8 @@ CACHE_DIR = ROOT / "data" / "oplab-free"
 API_BASE = os.getenv("OPLAB_API_BASE", "https://api.oplab.com.br").rstrip("/")
 FREE_OPLAB_BASE = os.getenv("FREE_OPLAB_BASE", "https://opcoes.oplab.com.br").rstrip("/")
 RISK_FREE_RATE = float(os.getenv("RISK_FREE_RATE", "0.105"))
+DIVIDEND_YIELD = float(os.getenv("DIVIDEND_YIELD", "0.0"))
+TRADING_DAYS = int(os.getenv("TRADING_DAYS", "252"))
 MARKET_TZ = ZoneInfo(os.getenv("MARKET_TZ", "America/Sao_Paulo"))
 MARKET_OPEN = os.getenv("MARKET_OPEN", "10:00")
 MARKET_CLOSE = os.getenv("MARKET_CLOSE", "18:00")
@@ -71,22 +73,87 @@ def norm_pdf(x: float) -> float:
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
 
-def black_scholes(spot: float, strike: float, days: int, rate: float, iv: float, kind: str) -> dict[str, float]:
-    t = max(days, 1) / 252.0
+def business_days_until(expiration: date) -> int:
+    current = date.today()
+    if expiration <= current:
+        return 0
+    days = 0
+    while current < expiration:
+        current += timedelta(days=1)
+        if current.weekday() < 5:
+            days += 1
+    return days
+
+
+def black_scholes(
+    spot: float,
+    strike: float,
+    business_days: int,
+    rate: float,
+    iv: float,
+    kind: str,
+    dividend_yield: float = DIVIDEND_YIELD,
+) -> dict[str, float]:
+    t = max(business_days, 1) / TRADING_DAYS
     vol = max(iv, 0.0001)
-    d1 = (math.log(spot / strike) + (rate + 0.5 * vol * vol) * t) / (vol * math.sqrt(t))
+    discount = math.exp(-rate * t)
+    carry = math.exp(-dividend_yield * t)
+    d1 = (math.log(spot / strike) + (rate - dividend_yield + 0.5 * vol * vol) * t) / (vol * math.sqrt(t))
     d2 = d1 - vol * math.sqrt(t)
     if kind == "put":
-        price = strike * math.exp(-rate * t) * norm_cdf(-d2) - spot * norm_cdf(-d1)
-        delta = norm_cdf(d1) - 1.0
-        theta = (-(spot * norm_pdf(d1) * vol) / (2 * math.sqrt(t)) + rate * strike * math.exp(-rate * t) * norm_cdf(-d2)) / 252.0
+        price = strike * discount * norm_cdf(-d2) - spot * carry * norm_cdf(-d1)
+        delta = carry * (norm_cdf(d1) - 1.0)
+        theta = (
+            -(spot * carry * norm_pdf(d1) * vol) / (2 * math.sqrt(t))
+            + rate * strike * discount * norm_cdf(-d2)
+            - dividend_yield * spot * carry * norm_cdf(-d1)
+        ) / TRADING_DAYS
+        rho = -strike * t * discount * norm_cdf(-d2) / 100.0
+        prob_itm = norm_cdf(-d2)
+        break_even = strike - price
     else:
-        price = spot * norm_cdf(d1) - strike * math.exp(-rate * t) * norm_cdf(d2)
-        delta = norm_cdf(d1)
-        theta = (-(spot * norm_pdf(d1) * vol) / (2 * math.sqrt(t)) - rate * strike * math.exp(-rate * t) * norm_cdf(d2)) / 252.0
-    gamma = norm_pdf(d1) / (spot * vol * math.sqrt(t))
-    vega = spot * norm_pdf(d1) * math.sqrt(t) / 100.0
-    return {"fair": price, "delta": delta, "gamma": gamma, "theta": theta, "vega": vega}
+        price = spot * carry * norm_cdf(d1) - strike * discount * norm_cdf(d2)
+        delta = carry * norm_cdf(d1)
+        theta = (
+            -(spot * carry * norm_pdf(d1) * vol) / (2 * math.sqrt(t))
+            - rate * strike * discount * norm_cdf(d2)
+            + dividend_yield * spot * carry * norm_cdf(d1)
+        ) / TRADING_DAYS
+        rho = strike * t * discount * norm_cdf(d2) / 100.0
+        prob_itm = norm_cdf(d2)
+        break_even = strike + price
+    gamma = carry * norm_pdf(d1) / (spot * vol * math.sqrt(t))
+    vega = spot * carry * norm_pdf(d1) * math.sqrt(t) / 100.0
+    expected_move = spot * vol * math.sqrt(t)
+    return {
+        "fair": max(0.0, price),
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta,
+        "vega": vega,
+        "rho": rho,
+        "d1": d1,
+        "d2": d2,
+        "probItm": prob_itm,
+        "probTouch": min(1.0, prob_itm * 2),
+        "breakEven": break_even,
+        "expectedMove": expected_move,
+    }
+
+
+def implied_volatility(spot: float, strike: float, business_days: int, rate: float, price: float, kind: str) -> float:
+    if spot <= 0 or strike <= 0 or price <= 0 or business_days <= 0:
+        return 0
+    low = 0.01
+    high = 3.0
+    for _ in range(70):
+        mid = (low + high) / 2
+        fair = black_scholes(spot, strike, business_days, rate, mid, kind)["fair"]
+        if fair > price:
+            high = mid
+        else:
+            low = mid
+    return (low + high) / 2
 
 
 def as_float(value: Any, default: float = 0.0) -> float:
@@ -362,7 +429,7 @@ def demo_market(symbol: str) -> tuple[float, list[dict[str, Any]], list[str]]:
             strike = round(spot * (1 + offset), 2)
             for kind in ("call", "put"):
                 iv = 0.26 + abs(offset) * 0.7 + random.random() * 0.05
-                days = max((exp - date.today()).days, 1)
+                days = max(business_days_until(exp), 1)
                 bs = black_scholes(spot, strike, days, RISK_FREE_RATE, iv, kind)
                 spread = max(0.02, bs["fair"] * (0.025 + abs(offset) * 0.08))
                 bid = max(0.01, bs["fair"] - spread / 2)
@@ -407,31 +474,46 @@ def normalize_option(raw: dict[str, Any], spot: float) -> dict[str, Any] | None:
     iv_raw = as_float(pick(raw, "iv", "implied_volatility", "volatility", "vol_imp"))
     iv = iv_raw / 100 if iv_raw > 2 else iv_raw
     if iv <= 0:
+        observed_price = (bid + ask) / 2 if bid > 0 and ask > 0 else last
+        iv = implied_volatility(spot, strike, business_days_until(expiration), RISK_FREE_RATE, observed_price, kind)
+    if iv <= 0:
         iv = 0.32
-    days = max((expiration - date.today()).days, 0)
-    bs = black_scholes(spot, strike, days, RISK_FREE_RATE, iv, kind)
+    calendar_days = max((expiration - date.today()).days, 0)
+    business_days = business_days_until(expiration)
+    bs = black_scholes(spot, strike, business_days, RISK_FREE_RATE, iv, kind)
     spread_pct = (ask - bid) / mid if mid > 0 and ask >= bid and bid > 0 else 1.0
     intrinsic = max(0.0, spot - strike) if kind == "call" else max(0.0, strike - spot)
     extrinsic = max(0.0, mid - intrinsic)
     volume = as_float(pick(raw, "volume", "financial_volume", "trades", "quantity"))
     liquidity = as_float(pick(raw, "liquidity", "liquidity_score", "score_liquidity"), min(5, math.log10(max(volume, 1)) + 1))
     moneyness = strike / spot if spot else 0
+    entry_price = ask if ask > 0 else mid
     edge = bs["fair"] - mid
+    executable_edge = bs["fair"] - entry_price if entry_price > 0 else edge
+    edge_pct = executable_edge / entry_price if entry_price > 0 else 0
+    theta_pct = bs["theta"] / entry_price if entry_price > 0 else 0
+    break_even_distance = abs(bs["breakEven"] - spot) / spot if spot else 0
+    asymmetry = edge_pct
+    asymmetry += max(-0.08, min(0.08, bs["expectedMove"] / max(entry_price, 0.01) / 100))
+    asymmetry -= max(0.0, spread_pct - 0.12)
+    asymmetry -= max(0.0, -theta_pct) * 6
     score = 50
     score += min(25, liquidity * 5)
-    score += max(-20, min(20, edge / mid * 35)) if mid > 0 else -20
+    score += max(-25, min(25, edge_pct * 45)) if entry_price > 0 else -25
     score -= min(20, spread_pct * 80)
     score -= 25 if mid <= 0 or (bid <= 0 and ask <= 0) else 0
     score -= 25 if bid <= 0 or ask <= 0 else 0
     score -= 8 if liquidity <= 0 else 0
-    score -= 10 if days < 7 or days > 120 else 0
+    score -= 10 if calendar_days < 7 or calendar_days > 120 else 0
     score += 8 if 0.9 <= moneyness <= 1.1 else -4
+    score += max(-8, min(8, asymmetry * 30))
     return {
         "symbol": symbol,
         "type": kind,
         "strike": strike,
         "expiration": expiration.isoformat(),
-        "dte": days,
+        "dte": calendar_days,
+        "businessDte": business_days,
         "bid": bid,
         "ask": ask,
         "last": last,
@@ -439,10 +521,21 @@ def normalize_option(raw: dict[str, Any], spot: float) -> dict[str, Any] | None:
         "iv": iv,
         "fair": bs["fair"],
         "edge": edge,
+        "executableEdge": executable_edge,
+        "edgePct": edge_pct,
+        "thetaPct": theta_pct,
+        "asymmetry": asymmetry,
         "delta": as_float(pick(raw, "delta"), bs["delta"]),
         "gamma": as_float(pick(raw, "gamma"), bs["gamma"]),
         "theta": as_float(pick(raw, "theta"), bs["theta"]),
         "vega": as_float(pick(raw, "vega"), bs["vega"]),
+        "rho": as_float(pick(raw, "rho"), bs["rho"]),
+        "probItm": bs["probItm"],
+        "probTouch": bs["probTouch"],
+        "breakEven": bs["breakEven"],
+        "breakEvenDistance": break_even_distance,
+        "expectedMove": bs["expectedMove"],
+        "expectedMovePct": bs["expectedMove"] / spot if spot else 0,
         "intrinsic": intrinsic,
         "extrinsic": extrinsic,
         "spreadPct": spread_pct,
@@ -451,6 +544,43 @@ def normalize_option(raw: dict[str, Any], spot: float) -> dict[str, Any] | None:
         "moneyness": moneyness,
         "score": max(0, min(100, score)),
     }
+
+
+def enrich_option_signals(options: list[dict[str, Any]]) -> None:
+    groups: dict[tuple[str, str], list[float]] = {}
+    for item in options:
+        if item["iv"] > 0:
+            groups.setdefault((item["expiration"], item["type"]), []).append(item["iv"])
+    medians = {key: statistics.median(values) for key, values in groups.items() if values}
+
+    for item in options:
+        group_median = medians.get((item["expiration"], item["type"]), item["iv"])
+        iv_relative = item["iv"] - group_median
+        tradable = item["bid"] > 0 and item["ask"] > 0 and item["spreadPct"] <= 0.35
+        expected_move_pct = item["expectedMovePct"]
+        breakeven_covered = expected_move_pct / item["breakEvenDistance"] if item["breakEvenDistance"] > 0 else 0
+        value_score = 0.0
+        value_score += max(-12, min(12, item["edgePct"] * 45))
+        value_score += max(-6, min(6, -iv_relative * 35))
+        value_score += max(-5, min(5, expected_move_pct * 10))
+        value_score += 4 if breakeven_covered > 1 else -2
+        value_score -= 15 if not tradable else 0
+
+        if not tradable:
+            signal = "Aguardar liquidez"
+        elif item["edgePct"] > 0.08 and iv_relative <= 0.03:
+            signal = "Compra favorecida"
+        elif item["edgePct"] < -0.08 and iv_relative >= 0.04:
+            signal = "Venda/cobertura favorecida"
+        elif item["spreadPct"] <= 0.12 and abs(item["edgePct"]) <= 0.05:
+            signal = "Preco justo e liquido"
+        else:
+            signal = "Assimetria moderada"
+
+        item["ivRelative"] = iv_relative
+        item["valueScore"] = value_score
+        item["signal"] = signal
+        item["score"] = max(0, min(100, item["score"] + value_score))
 
 
 def build_analysis(symbol: str) -> dict[str, Any]:
@@ -473,6 +603,7 @@ def build_analysis(symbol: str) -> dict[str, Any]:
         spot, raw_options, warnings = demo_market(symbol)
         options = [item for item in (normalize_option(raw, spot) for raw in raw_options) if item]
         source = "demo"
+    enrich_option_signals(options)
     calls = [item for item in options if item["type"] == "call"]
     puts = [item for item in options if item["type"] == "put"]
     liquid = [item for item in options if item["bid"] > 0 and item["ask"] > 0 and item["spreadPct"] <= 0.35 and item["dte"] <= 90]
@@ -485,7 +616,8 @@ def build_analysis(symbol: str) -> dict[str, Any]:
     liquid_ivs = [item["iv"] for item in liquid if item["iv"] > 0]
     spreads = [item["spreadPct"] for item in options if item["mid"] > 0]
     top_pool = liquid or options
-    top = sorted(top_pool, key=lambda item: item["score"], reverse=True)[:8]
+    ranked_pool = sorted(top_pool, key=lambda item: item["score"], reverse=True)
+    top = [item for item in ranked_pool if item["score"] >= 20][:8] or ranked_pool[:5]
     hedges = sorted([item for item in liquid if item["type"] == "put"], key=lambda item: (abs(item["delta"] + 0.35), item["spreadPct"]))[:5]
     income = sorted([item for item in liquid if item["type"] == "call"], key=lambda item: (abs(item["delta"] - 0.25), -item["score"]))[:5]
     alerts = []

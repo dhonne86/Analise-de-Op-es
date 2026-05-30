@@ -20,13 +20,14 @@ function metric(label, value) {
 }
 
 function optionItem(item) {
-  const edge = item.edge >= 0 ? "+" : "";
+  const edge = item.executableEdge >= 0 ? "+" : "";
   return `
     <div class="optionItem">
       <div>
         <strong>${item.symbol}</strong>
         <small>${item.type.toUpperCase()} ${fmtMoney.format(item.strike)} / ${item.dte} dias / VI ${fmtPct.format(item.iv)}</small>
-        <small>Mid ${fmtMoney.format(item.mid)} | Valor justo ${fmtMoney.format(item.fair)} | Edge ${edge}${fmtMoney.format(item.edge)}</small>
+        <small>${item.signal} | Edge exec. ${edge}${fmtMoney.format(item.executableEdge)} | Prob. ITM ${fmtPct.format(item.probItm || 0)}</small>
+        <small>Justo ${fmtMoney.format(item.fair)} | Breakeven ${fmtMoney.format(item.breakEven || 0)} | Theta/dia ${fmtMoney.format(item.theta || 0)}</small>
       </div>
       <div class="score">${Math.round(item.score)}</div>
     </div>
@@ -103,7 +104,9 @@ function renderChain() {
         <td>${fmtMoney.format(item.mid)}</td>
         <td>${fmtPct.format(item.iv)}</td>
         <td>${fmtNum.format(item.delta)}</td>
+        <td>${fmtPct.format(item.probItm || 0)}</td>
         <td>${fmtPct.format(item.spreadPct)}</td>
+        <td>${item.signal || ""}</td>
         <td><strong>${Math.round(item.score)}</strong></td>
       </tr>
     `
