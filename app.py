@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parent
@@ -22,6 +23,44 @@ CACHE_DIR = ROOT / "data" / "oplab-free"
 API_BASE = os.getenv("OPLAB_API_BASE", "https://api.oplab.com.br").rstrip("/")
 FREE_OPLAB_BASE = os.getenv("FREE_OPLAB_BASE", "https://opcoes.oplab.com.br").rstrip("/")
 RISK_FREE_RATE = float(os.getenv("RISK_FREE_RATE", "0.105"))
+MARKET_TZ = ZoneInfo(os.getenv("MARKET_TZ", "America/Sao_Paulo"))
+MARKET_OPEN = os.getenv("MARKET_OPEN", "10:00")
+MARKET_CLOSE = os.getenv("MARKET_CLOSE", "18:00")
+FREE_CACHE_OPEN_SECONDS = int(os.getenv("FREE_CACHE_OPEN_SECONDS", "900"))
+FREE_CACHE_CLOSED_SECONDS = int(os.getenv("FREE_CACHE_CLOSED_SECONDS", "86400"))
+
+
+def parse_hhmm(value: str) -> tuple[int, int]:
+    hour, minute = value.split(":", 1)
+    return int(hour), int(minute)
+
+
+def market_clock(now: datetime | None = None) -> dict[str, Any]:
+    now = now.astimezone(MARKET_TZ) if now else datetime.now(MARKET_TZ)
+    open_hour, open_minute = parse_hhmm(MARKET_OPEN)
+    close_hour, close_minute = parse_hhmm(MARKET_CLOSE)
+    open_at = now.replace(hour=open_hour, minute=open_minute, second=0, microsecond=0)
+    close_at = now.replace(hour=close_hour, minute=close_minute, second=0, microsecond=0)
+    weekday = now.weekday() < 5
+    open_now = weekday and open_at <= now <= close_at
+    if not weekday:
+        label = "Fechado: fim de semana"
+    elif now < open_at:
+        label = "Pre-pregao"
+    elif open_now:
+        label = "Pregao aberto"
+    else:
+        label = "Fechado"
+    return {
+        "now": now,
+        "isWeekday": weekday,
+        "isOpen": open_now,
+        "label": label,
+        "openAt": open_at,
+        "closeAt": close_at,
+        "cacheTtl": FREE_CACHE_OPEN_SECONDS if open_now else FREE_CACHE_CLOSED_SECONDS,
+        "nextRefreshSeconds": FREE_CACHE_OPEN_SECONDS if open_now else 3600,
+    }
 
 
 def norm_cdf(x: float) -> float:
@@ -143,6 +182,21 @@ def infer_spot(symbol: str, payload: Any, options: list[dict[str, Any]]) -> floa
     return statistics.median(strikes) if strikes else 0
 
 
+def infer_source_updated_at(options: list[dict[str, Any]]) -> str | None:
+    timestamps: list[datetime] = []
+    for item in options:
+        raw = item.get("time") or item.get("updated_at") or item.get("datetime")
+        if not raw:
+            continue
+        try:
+            timestamps.append(datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(MARKET_TZ))
+        except ValueError:
+            pass
+    if not timestamps:
+        return None
+    return max(timestamps).isoformat(timespec="seconds")
+
+
 def normalize_free_leg(leg: dict[str, Any]) -> dict[str, Any]:
     bs = leg.get("bs") if isinstance(leg.get("bs"), dict) else {}
     days = int(as_float(pick(leg, "days_to_maturity", "daysToMaturity", default=pick(bs, "daysToMaturity", default=0))))
@@ -167,6 +221,7 @@ def normalize_free_leg(leg: dict[str, Any]) -> dict[str, Any]:
         "gamma": pick(bs, "gamma", default=pick(leg, "gamma", default=0)),
         "theta": pick(bs, "theta", default=pick(leg, "theta", default=0)),
         "vega": pick(bs, "vega", default=pick(leg, "vega", default=0)),
+        "time": pick(leg, "time", "updated_at", "datetime", default=None),
     }
 
 
@@ -194,13 +249,17 @@ def extract_free_options(payload: Any) -> list[dict[str, Any]]:
 
 def fetch_oplab_free_daily(symbol: str) -> tuple[float, list[dict[str, Any]], list[str]]:
     symbol = symbol.upper()
+    clock = market_clock()
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_file = CACHE_DIR / f"{symbol}-{date.today().isoformat()}.json"
     warnings: list[str] = []
     if cache_file.exists():
         cached = json.loads(cache_file.read_text(encoding="utf-8"))
-        warnings.append(f"Cache gratuito diario da OpLab: {cache_file.name}.")
-        return as_float(cached.get("spot")), cached.get("options") or [], warnings
+        cached_at = parse_date(cached.get("cachedAt"))
+        age = time.time() - as_float(cached.get("cachedEpoch"), default=0)
+        if cached_at == date.today() and age <= clock["cacheTtl"]:
+            warnings.append(f"Cache gratuito da OpLab: {cache_file.name}, idade {round(age / 60)} min.")
+            return as_float(cached.get("spot")), cached.get("options") or [], warnings
 
     url = f"{FREE_OPLAB_BASE}/mercado/acoes/opcoes/{urllib.parse.quote(symbol)}"
     req = urllib.request.Request(url, headers={"User-Agent": "analista-opcoes-free/1.0"}, method="GET")
@@ -216,10 +275,12 @@ def fetch_oplab_free_daily(symbol: str) -> tuple[float, list[dict[str, Any]], li
         "spot": spot,
         "options": options,
         "cachedAt": datetime.now().isoformat(timespec="seconds"),
+        "cachedEpoch": time.time(),
+        "sourceUpdatedAt": infer_source_updated_at(options),
         "url": url,
     }
     cache_file.write_text(json.dumps(cache_payload, ensure_ascii=False), encoding="utf-8")
-    warnings.append("Dados gratuitos da OpLab com atraso e cache diario local.")
+    warnings.append("Snapshot gratuito da OpLab atualizado; cotacoes publicas possuem atraso.")
     return spot, options, warnings
 
 
@@ -414,20 +475,45 @@ def build_analysis(symbol: str) -> dict[str, Any]:
         source = "demo"
     calls = [item for item in options if item["type"] == "call"]
     puts = [item for item in options if item["type"] == "put"]
+    liquid = [item for item in options if item["bid"] > 0 and item["ask"] > 0 and item["spreadPct"] <= 0.35 and item["dte"] <= 90]
+    weeklies = [item for item in liquid if item["dte"] <= 10]
+    front_month = [item for item in liquid if 10 < item["dte"] <= 35]
+    atm = [item for item in liquid if 0.97 <= item["moneyness"] <= 1.03]
+    otm_puts = [item for item in liquid if item["type"] == "put" and 0.9 <= item["moneyness"] < 0.98]
+    otm_calls = [item for item in liquid if item["type"] == "call" and 1.02 < item["moneyness"] <= 1.1]
     ivs = [item["iv"] for item in options if item["iv"] > 0]
+    liquid_ivs = [item["iv"] for item in liquid if item["iv"] > 0]
     spreads = [item["spreadPct"] for item in options if item["mid"] > 0]
-    top = sorted(options, key=lambda item: item["score"], reverse=True)[:8]
-    hedges = sorted(puts, key=lambda item: (abs(item["delta"] + 0.35), item["spreadPct"]))[:5]
-    income = sorted(calls, key=lambda item: (abs(item["delta"] - 0.25), -item["score"]))[:5]
+    top_pool = liquid or options
+    top = sorted(top_pool, key=lambda item: item["score"], reverse=True)[:8]
+    hedges = sorted([item for item in liquid if item["type"] == "put"], key=lambda item: (abs(item["delta"] + 0.35), item["spreadPct"]))[:5]
+    income = sorted([item for item in liquid if item["type"] == "call"], key=lambda item: (abs(item["delta"] - 0.25), -item["score"]))[:5]
     alerts = []
+    clock = market_clock()
+    if source == "oplab-free":
+        alerts.append("Fonte gratuita da OpLab: leitura atrasada, adequada para acompanhamento tatico sem execucao automatica.")
+    if clock["isOpen"]:
+        alerts.append("Pregao aberto: atualizacao automatica ativada durante a janela de mercado.")
+    else:
+        alerts.append(f"{clock['label']}: mantendo cache mais longo ate a proxima sessao.")
     if spreads and statistics.median(spreads) > 0.18:
         alerts.append("Spreads medianos elevados: prefira ordens limitadas e reduza tamanho.")
-    if ivs and statistics.median(ivs) > 0.45:
+    reference_ivs = liquid_ivs or ivs
+    if reference_ivs and statistics.median(reference_ivs) > 0.45:
         alerts.append("Volatilidade implicita acima do usual: premio rico, bom para estruturas vendidas com risco definido.")
-    if ivs and statistics.median(ivs) < 0.22:
+    if reference_ivs and statistics.median(reference_ivs) < 0.22:
         alerts.append("Volatilidade implicita baixa: compras direcionais e travas debitadas ficam relativamente mais atraentes.")
     if not alerts:
         alerts.append("Cadeia equilibrada: priorize liquidez, vencimentos de 20 a 60 dias e risco definido.")
+    put_iv = statistics.median([item["iv"] for item in otm_puts]) if otm_puts else 0
+    call_iv = statistics.median([item["iv"] for item in otm_calls]) if otm_calls else 0
+    skew = put_iv - call_iv if put_iv and call_iv else 0
+    if skew > 0.05:
+        pulse = "Defensivo: puts OTM carregam premio acima das calls."
+    elif skew < -0.05:
+        pulse = "Apetite por alta: calls OTM carregam premio relativo."
+    else:
+        pulse = "Neutro: skew entre calls e puts esta equilibrado."
     return {
         "symbol": symbol.upper(),
         "source": source,
@@ -437,9 +523,26 @@ def build_analysis(symbol: str) -> dict[str, Any]:
             "contracts": len(options),
             "calls": len(calls),
             "puts": len(puts),
+            "liquidContracts": len(liquid),
+            "weeklies": len(weeklies),
             "medianIv": statistics.median(ivs) if ivs else 0,
+            "liquidMedianIv": statistics.median(liquid_ivs) if liquid_ivs else 0,
             "medianSpread": statistics.median(spreads) if spreads else 0,
             "bestScore": top[0]["score"] if top else 0,
+        },
+        "market": {
+            "session": clock["label"],
+            "isOpen": clock["isOpen"],
+            "timezone": str(MARKET_TZ),
+            "openAt": clock["openAt"].isoformat(timespec="minutes"),
+            "closeAt": clock["closeAt"].isoformat(timespec="minutes"),
+            "nextRefreshSeconds": clock["nextRefreshSeconds"],
+            "liquidContracts": len(liquid),
+            "weeklies": len(weeklies),
+            "frontMonth": len(front_month),
+            "atmIv": statistics.median([item["iv"] for item in atm]) if atm else 0,
+            "putCallSkew": skew,
+            "pulse": pulse,
         },
         "top": top,
         "hedges": hedges,

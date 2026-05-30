@@ -32,6 +32,21 @@ https://opcoes.oplab.com.br/mercado/acoes/opcoes/{ATIVO}
 
 Os dados sao salvos em cache local por dia em `data/oplab-free`. No Render, o disco gratuito pode ser recriado entre deploys; ainda assim a aplicacao volta a consultar a pagina publica quando o cache nao existir.
 
+## Modo pregao
+
+Em dias uteis, durante a janela configurada em `MARKET_OPEN` e `MARKET_CLOSE`, o snapshot gratuito expira a cada 15 minutos e a tela agenda atualizacao automatica. Fora do pregao, o cache fica mais longo para evitar consultas desnecessarias.
+
+Variaveis opcionais:
+
+```text
+MARKET_OPEN=10:00
+MARKET_CLOSE=18:00
+FREE_CACHE_OPEN_SECONDS=900
+FREE_CACHE_CLOSED_SECONDS=86400
+```
+
+Importante: a fonte gratuita publica da OpLab possui atraso. Para tick a tick real-time, e necessario contratar uma fonte autorizada/API paga.
+
 ## Configurar API PRO da OpLab
 
 Somente se voce tiver plano com API, ligue a API paga explicitamente:

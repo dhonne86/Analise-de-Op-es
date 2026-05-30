@@ -1,6 +1,8 @@
 const state = {
   data: null,
   tab: "hedges",
+  refreshTimer: null,
+  activeSymbol: "PETR4",
 };
 
 const fmtMoney = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
@@ -34,11 +36,40 @@ function optionItem(item) {
 function renderMetrics(summary) {
   el("metrics").innerHTML = [
     metric("Contratos", summary.contracts),
-    metric("Calls", summary.calls),
-    metric("Puts", summary.puts),
+    metric("Liquidos", summary.liquidContracts),
+    metric("Semana", summary.weeklies),
     metric("VI mediana", fmtPct.format(summary.medianIv)),
-    metric("Spread mediano", fmtPct.format(summary.medianSpread)),
+    metric("VI liquida", fmtPct.format(summary.liquidMedianIv || summary.medianIv)),
   ].join("");
+}
+
+function marketCell(label, value) {
+  return `<div class="marketCell"><span>${label}</span><strong>${value}</strong></div>`;
+}
+
+function renderMarket(market) {
+  if (!market) return;
+  el("refreshStatus").textContent = market.isOpen
+    ? `Atualiza a cada ${Math.round(market.nextRefreshSeconds / 60)} min`
+    : "Atualizacao horaria fora do pregao";
+  el("marketGrid").innerHTML = [
+    marketCell("Sessao", market.session),
+    marketCell("Liquidez", `${market.liquidContracts} contratos`),
+    marketCell("Front", `${market.frontMonth} contratos`),
+    marketCell("VI ATM", fmtPct.format(market.atmIv || 0)),
+    marketCell("Skew P/C", fmtPct.format(market.putCallSkew || 0)),
+    `<div class="marketPulse">${market.pulse}</div>`,
+  ].join("");
+}
+
+function scheduleRefresh(data) {
+  if (state.refreshTimer) {
+    window.clearTimeout(state.refreshTimer);
+  }
+  const seconds = Math.max(60, Math.min(3600, data.market?.nextRefreshSeconds || 900));
+  state.refreshTimer = window.setTimeout(() => {
+    load(state.activeSymbol, true).catch((error) => setStatus(error.message));
+  }, seconds * 1000);
 }
 
 function renderIdeas() {
@@ -91,6 +122,7 @@ function render(data) {
   el("source").textContent = sources[data.source] || "Fonte OpLab";
   el("spot").textContent = fmtMoney.format(data.spot);
   renderMetrics(data.summary);
+  renderMarket(data.market);
   el("alerts").innerHTML = data.alerts.map((text) => `<div class="alert">${text}</div>`).join("");
   el("topList").innerHTML = data.top.map(optionItem).join("");
   renderIdeas();
@@ -98,10 +130,12 @@ function render(data) {
 
   const extra = data.warnings && data.warnings.length ? ` | ${data.warnings[0]}` : "";
   setStatus(`${data.options.length} opcoes analisadas${extra}`);
+  scheduleRefresh(data);
 }
 
-async function load(symbol) {
-  setStatus(`Buscando snapshot gratuito de ${symbol.toUpperCase()}...`);
+async function load(symbol, silent = false) {
+  state.activeSymbol = symbol.toUpperCase();
+  if (!silent) setStatus(`Buscando snapshot gratuito de ${symbol.toUpperCase()}...`);
   const response = await fetch(`/api/analyze?symbol=${encodeURIComponent(symbol)}`);
   if (!response.ok) throw new Error("Falha ao consultar analise");
   render(await response.json());
