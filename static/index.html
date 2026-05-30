@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Analista de Opcoes</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <aside class="side">
+          <div>
+            <p class="eyebrow">OpLab data desk</p>
+            <h1>Analista de Opcoes</h1>
+          </div>
+
+          <form id="searchForm" class="search">
+            <label for="symbol">Ativo</label>
+            <div class="searchRow">
+              <input id="symbol" name="symbol" value="PETR4" autocomplete="off" />
+              <button type="submit" title="Analisar">Analisar</button>
+            </div>
+          </form>
+
+          <div class="filters">
+            <label>
+              <span>Tipo</span>
+              <select id="typeFilter">
+                <option value="all">Calls e puts</option>
+                <option value="call">Calls</option>
+                <option value="put">Puts</option>
+              </select>
+            </label>
+            <label>
+              <span>Score minimo</span>
+              <input id="scoreFilter" type="range" min="0" max="100" value="45" />
+            </label>
+          </div>
+
+          <div class="status" id="status">Pronto</div>
+        </aside>
+
+        <section class="main">
+          <header class="topbar">
+            <div>
+              <p id="source" class="eyebrow">Fonte</p>
+              <h2 id="headline">Carregando PETR4</h2>
+            </div>
+            <div class="spot">
+              <span>Spot</span>
+              <strong id="spot">--</strong>
+            </div>
+          </header>
+
+          <section class="metrics" id="metrics"></section>
+
+          <section class="band">
+            <div class="sectionHead">
+              <h3>Leitura do analista</h3>
+            </div>
+            <div class="alerts" id="alerts"></div>
+          </section>
+
+          <section class="split">
+            <div class="panel">
+              <div class="sectionHead">
+                <h3>Melhores assimetrias</h3>
+              </div>
+              <div id="topList" class="list"></div>
+            </div>
+            <div class="panel">
+              <div class="sectionHead">
+                <h3>Seguro e renda</h3>
+              </div>
+              <div class="tabs">
+                <button class="tab active" data-tab="hedges">Protecao</button>
+                <button class="tab" data-tab="income">Renda</button>
+              </div>
+              <div id="ideaList" class="list"></div>
+            </div>
+          </section>
+
+          <section class="chain">
+            <div class="sectionHead">
+              <h3>Cadeia filtrada</h3>
+              <span id="chainCount"></span>
+            </div>
+            <div class="tableWrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Opcao</th>
+                    <th>Tipo</th>
+                    <th>Strike</th>
+                    <th>Venc.</th>
+                    <th>Dias</th>
+                    <th>Mid</th>
+                    <th>VI</th>
+                    <th>Delta</th>
+                    <th>Spread</th>
+                    <th>Score</th>
+                  </tr>
+                </thead>
+                <tbody id="chainBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
