@@ -10,6 +10,27 @@ python app.py
 
 Abra: http://localhost:8000
 
+## Publicar no Render
+
+Este repositorio inclui `render.yaml`. No Render, crie um novo Blueprint apontando para:
+
+```text
+https://github.com/dhonne86/Analise-de-Op-es.git
+```
+
+Depois configure as variaveis secretas no servico:
+
+```text
+OPLAB_EMAIL
+OPLAB_PASSWORD
+```
+
+ou:
+
+```text
+OPLAB_ACCESS_TOKEN
+```
+
 ## Configurar OpLab
 
 Crie variaveis de ambiente antes de iniciar:

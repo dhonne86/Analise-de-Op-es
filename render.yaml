@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: analise-de-opcoes
+    runtime: python
+    plan: free
+    repo: https://github.com/dhonne86/Analise-de-Op-es.git
+    branch: main
+    buildCommand: ""
+    startCommand: "python app.py"
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.9
+      - key: OPLAB_API_BASE
+        value: https://api.oplab.com.br
+      - key: OPLAB_UNDERLYING_PATH
+        value: /v3/market/stocks/{symbol}
+      - key: OPLAB_OPTIONS_PATH
+        value: /v3/market/options/{symbol}
