@@ -83,7 +83,12 @@ function renderChain() {
 function render(data) {
   state.data = data;
   el("headline").textContent = `${data.symbol} em ${data.generatedAt.replace("T", " ")}`;
-  el("source").textContent = data.source === "oplab" ? "Fonte OpLab" : "Fonte demo";
+  const sources = {
+    "oplab-free": "OpLab gratis diario",
+    "oplab-api": "OpLab API PRO",
+    demo: "Fonte demo",
+  };
+  el("source").textContent = sources[data.source] || "Fonte OpLab";
   el("spot").textContent = fmtMoney.format(data.spot);
   renderMetrics(data.summary);
   el("alerts").innerHTML = data.alerts.map((text) => `<div class="alert">${text}</div>`).join("");
@@ -96,7 +101,7 @@ function render(data) {
 }
 
 async function load(symbol) {
-  setStatus(`Buscando ${symbol.toUpperCase()}...`);
+  setStatus(`Buscando snapshot gratuito de ${symbol.toUpperCase()}...`);
   const response = await fetch(`/api/analyze?symbol=${encodeURIComponent(symbol)}`);
   if (!response.ok) throw new Error("Falha ao consultar analise");
   render(await response.json());

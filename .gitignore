@@ -7,3 +7,4 @@ node_modules/
 .DS_Store
 *.log
 verification.png
+data/

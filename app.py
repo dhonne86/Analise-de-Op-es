@@ -5,7 +5,6 @@ import math
 import os
 import random
 import statistics
-import sys
 import time
 import urllib.error
 import urllib.parse
@@ -19,7 +18,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
+CACHE_DIR = ROOT / "data" / "oplab-free"
 API_BASE = os.getenv("OPLAB_API_BASE", "https://api.oplab.com.br").rstrip("/")
+FREE_OPLAB_BASE = os.getenv("FREE_OPLAB_BASE", "https://opcoes.oplab.com.br").rstrip("/")
 RISK_FREE_RATE = float(os.getenv("RISK_FREE_RATE", "0.105"))
 
 
@@ -92,6 +93,134 @@ def unwrap_items(payload: Any) -> list[dict[str, Any]]:
         if "calls" in payload or "puts" in payload:
             return [*(payload.get("calls") or []), *(payload.get("puts") or [])]
     return []
+
+
+def walk_json(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from walk_json(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk_json(child)
+
+
+def extract_next_data(html: str) -> Any:
+    marker = "__NEXT_DATA__"
+    marker_at = html.find(marker)
+    if marker_at < 0:
+        raise RuntimeError("A pagina publica da OpLab nao trouxe __NEXT_DATA__.")
+    script_start = html.rfind("<script", 0, marker_at)
+    json_start = html.find(">", script_start) + 1
+    json_end = html.find("</script>", json_start)
+    if script_start < 0 or json_start <= 0 or json_end < 0:
+        raise RuntimeError("Nao foi possivel localizar o JSON publico da OpLab.")
+    return json.loads(html[json_start:json_end])
+
+
+def infer_spot(symbol: str, payload: Any, options: list[dict[str, Any]]) -> float:
+    symbol = symbol.upper()
+    candidates: list[float] = []
+    for item in walk_json(payload):
+        item_symbol = str(pick(item, "symbol", "ticker", "code", default="")).upper()
+        category = str(pick(item, "category", "type", default="")).upper()
+        if item_symbol == symbol and category not in ("CALL", "PUT"):
+            for field in ("close", "price", "last", "last_price", "value"):
+                value = as_float(item.get(field))
+                if value > 0:
+                    candidates.append(value)
+    if candidates:
+        return candidates[0]
+
+    atm_strikes = [
+        as_float(item.get("strike"))
+        for item in options
+        if str(pick(item, "bs", default={}).get("moneyness", "")).upper() == "ATM" and as_float(item.get("strike")) > 0
+    ]
+    if atm_strikes:
+        return statistics.median(atm_strikes)
+    strikes = [as_float(item.get("strike")) for item in options if as_float(item.get("strike")) > 0]
+    return statistics.median(strikes) if strikes else 0
+
+
+def normalize_free_leg(leg: dict[str, Any]) -> dict[str, Any]:
+    bs = leg.get("bs") if isinstance(leg.get("bs"), dict) else {}
+    days = int(as_float(pick(leg, "days_to_maturity", "daysToMaturity", default=pick(bs, "daysToMaturity", default=0))))
+    expiration = parse_date(pick(leg, "due_date", "maturity_date", "expiration", "expires_at"))
+    if expiration is None and days > 0:
+        # OpLab publica dias uteis; esta aproximacao em dias corridos mantem o vencimento util para analise.
+        expiration = date.today() + timedelta(days=max(1, round(days * 7 / 5)))
+    category = str(pick(leg, "category", "type", default=pick(bs, "type", default=""))).lower()
+    return {
+        "symbol": pick(leg, "symbol", "ticker", "code", default=""),
+        "type": category,
+        "strike": pick(leg, "strike", default=pick(bs, "strike", default=0)),
+        "due_date": expiration.isoformat() if expiration else None,
+        "bid": pick(leg, "bid", default=pick(bs, "bid", default=0)),
+        "ask": pick(leg, "ask", default=pick(bs, "ask", default=0)),
+        "last": pick(leg, "close", "price", default=pick(bs, "price", "premium", default=0)),
+        "iv": pick(bs, "volatility", default=pick(leg, "volatility", "iv", default=0)),
+        "volume": pick(leg, "volume", default=0),
+        "financial_volume": pick(leg, "financial_volume", default=0),
+        "liquidity": pick(leg, "liquidity", default=pick(bs, "liquidity-level", default=0)),
+        "delta": pick(bs, "delta", default=pick(leg, "delta", default=0)),
+        "gamma": pick(bs, "gamma", default=pick(leg, "gamma", default=0)),
+        "theta": pick(bs, "theta", default=pick(leg, "theta", default=0)),
+        "vega": pick(bs, "vega", default=pick(leg, "vega", default=0)),
+    }
+
+
+def extract_free_options(payload: Any) -> list[dict[str, Any]]:
+    options: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in walk_json(payload):
+        for side in ("call", "put"):
+            leg = item.get(side)
+            if isinstance(leg, dict) and leg.get("symbol"):
+                normalized = normalize_free_leg(leg)
+                key = str(normalized.get("symbol"))
+                if key and key not in seen:
+                    seen.add(key)
+                    options.append(normalized)
+        category = str(pick(item, "category", "type", default="")).upper()
+        if category in ("CALL", "PUT") and item.get("symbol"):
+            normalized = normalize_free_leg(item)
+            key = str(normalized.get("symbol"))
+            if key and key not in seen:
+                seen.add(key)
+                options.append(normalized)
+    return options
+
+
+def fetch_oplab_free_daily(symbol: str) -> tuple[float, list[dict[str, Any]], list[str]]:
+    symbol = symbol.upper()
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = CACHE_DIR / f"{symbol}-{date.today().isoformat()}.json"
+    warnings: list[str] = []
+    if cache_file.exists():
+        cached = json.loads(cache_file.read_text(encoding="utf-8"))
+        warnings.append(f"Cache gratuito diario da OpLab: {cache_file.name}.")
+        return as_float(cached.get("spot")), cached.get("options") or [], warnings
+
+    url = f"{FREE_OPLAB_BASE}/mercado/acoes/opcoes/{urllib.parse.quote(symbol)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "analista-opcoes-free/1.0"}, method="GET")
+    with urllib.request.urlopen(req, timeout=25) as response:
+        html = response.read().decode("utf-8", "ignore")
+    payload = extract_next_data(html)
+    options = extract_free_options(payload)
+    spot = infer_spot(symbol, payload, options)
+    if not spot or not options:
+        raise RuntimeError("A pagina publica gratuita da OpLab nao trouxe dados suficientes.")
+    cache_payload = {
+        "symbol": symbol,
+        "spot": spot,
+        "options": options,
+        "cachedAt": datetime.now().isoformat(timespec="seconds"),
+        "url": url,
+    }
+    cache_file.write_text(json.dumps(cache_payload, ensure_ascii=False), encoding="utf-8")
+    warnings.append("Dados gratuitos da OpLab com atraso e cache diario local.")
+    return spot, options, warnings
 
 
 @dataclass
@@ -192,7 +321,7 @@ def demo_market(symbol: str) -> tuple[float, list[dict[str, Any]], list[str]]:
                         "liquidity": max(0, min(5, 5 - abs(offset) * 18 + random.uniform(-0.6, 0.6))),
                     }
                 )
-    return spot, options, ["Modo demo ativo: configure credenciais da OpLab para dados reais."]
+    return spot, options, ["Modo demo ativo: a consulta gratuita diaria da OpLab falhou."]
 
 
 def normalize_option(raw: dict[str, Any], spot: float) -> dict[str, Any] | None:
@@ -229,8 +358,11 @@ def normalize_option(raw: dict[str, Any], spot: float) -> dict[str, Any] | None:
     edge = bs["fair"] - mid
     score = 50
     score += min(25, liquidity * 5)
-    score += max(-20, min(20, edge / max(mid, 0.1) * 35))
+    score += max(-20, min(20, edge / mid * 35)) if mid > 0 else -20
     score -= min(20, spread_pct * 80)
+    score -= 25 if mid <= 0 or (bid <= 0 and ask <= 0) else 0
+    score -= 25 if bid <= 0 or ask <= 0 else 0
+    score -= 8 if liquidity <= 0 else 0
     score -= 10 if days < 7 or days > 120 else 0
     score += 8 if 0.9 <= moneyness <= 1.1 else -4
     return {
@@ -263,10 +395,14 @@ def normalize_option(raw: dict[str, Any], spot: float) -> dict[str, Any] | None:
 def build_analysis(symbol: str) -> dict[str, Any]:
     warnings: list[str] = []
     try:
-        spot, raw_options, warnings = fetch_oplab(symbol)
+        if os.getenv("OPLAB_USE_PAID_API") == "1":
+            spot, raw_options, warnings = fetch_oplab(symbol)
+            source = "oplab-api"
+        else:
+            spot, raw_options, warnings = fetch_oplab_free_daily(symbol)
+            source = "oplab-free"
         if not spot or not raw_options:
             raise RuntimeError("Dados insuficientes retornados pela OpLab.")
-        source = "oplab"
     except Exception as exc:
         spot, raw_options, warnings = demo_market(symbol)
         warnings.append(str(exc))

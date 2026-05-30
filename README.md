@@ -1,6 +1,6 @@
 # Analista de Opcoes
 
-Aplicacao local para analisar opcoes da B3 com dados da OpLab quando as credenciais estiverem configuradas. Sem credenciais, ela roda em modo demo para validar o fluxo.
+Aplicacao local para analisar opcoes da B3 usando, por padrao, as paginas publicas gratuitas da OpLab com cotacoes atrasadas. O app salva um snapshot diario por ativo para evitar consultas repetidas.
 
 ## Rodar
 
@@ -20,24 +20,24 @@ Este repositorio inclui `render.yaml`. No Render, crie um novo Blueprint apontan
 https://github.com/dhonne86/Analise-de-Op-es.git
 ```
 
-Depois configure as variaveis secretas no servico:
+O app funciona sem secrets usando o snapshot gratuito diario. Configure secrets apenas se quiser ativar a API PRO.
+
+## Fonte gratuita diaria
+
+Por padrao, o app consulta:
 
 ```text
-OPLAB_EMAIL
-OPLAB_PASSWORD
+https://opcoes.oplab.com.br/mercado/acoes/opcoes/{ATIVO}
 ```
 
-ou:
+Os dados sao salvos em cache local por dia em `data/oplab-free`. No Render, o disco gratuito pode ser recriado entre deploys; ainda assim a aplicacao volta a consultar a pagina publica quando o cache nao existir.
 
-```text
-OPLAB_ACCESS_TOKEN
-```
+## Configurar API PRO da OpLab
 
-## Configurar OpLab
-
-Crie variaveis de ambiente antes de iniciar:
+Somente se voce tiver plano com API, ligue a API paga explicitamente:
 
 ```powershell
+$env:OPLAB_USE_PAID_API="1"
 $env:OPLAB_EMAIL="seu-email"
 $env:OPLAB_PASSWORD="sua-senha"
 python app.py
